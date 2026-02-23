@@ -1,0 +1,23 @@
+services:
+  timescaledb:
+    image: timescale/timescaledb:latest-pg16
+    container_name: hl_tsdb
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: hl
+      POSTGRES_PASSWORD: hlpassword
+      POSTGRES_DB: hldata
+    ports:
+      - "5432:5432"
+    volumes:
+      - tsdb_data:/var/lib/postgresql/data
+
+  adminer:
+    image: adminer
+    container_name: hl_adminer
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+
+volumes:
+  tsdb_data:
