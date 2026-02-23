@@ -1,0 +1,32 @@
+# Environment
+.env
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# Data (logs, DB dumps, raw data files)
+data/
+*.log
+*.csv
+*.parquet
+
+# Models (trained artifacts)
+models/saved/
+*.pkl
+*.joblib
+*.h5
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Docker volumes (never commit)
+*.sql

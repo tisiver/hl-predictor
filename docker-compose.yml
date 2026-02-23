@@ -10,7 +10,7 @@ services:
     ports:
       - "5432:5432"
     volumes:
-      - tsdb_data:/var/lib/postgresql/data
+      - /mnt/data/hl-tsdb:/var/lib/postgresql/data
 
   adminer:
     image: adminer
@@ -18,6 +18,3 @@ services:
     restart: unless-stopped
     ports:
       - "8080:8080"
-
-volumes:
-  tsdb_data:
