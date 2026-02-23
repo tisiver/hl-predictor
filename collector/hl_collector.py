@@ -144,8 +144,10 @@ class HyperliquidCollector:
                     backoff = 1
                     await ws.send(json.dumps({"method": "subscribe", "subscription": {"type": "trades"}}))
                     await ws.send(json.dumps({"method": "subscribe", "subscription": {"type": "liquidations"}}))
-                    for sym in HL_SYMBOLS:
+                    # l2Book: cap to top 10 symbols and stagger to avoid server-side drop
+                    for sym in HL_SYMBOLS[:10]:
                         await ws.send(json.dumps({"method": "subscribe", "subscription": {"type": "l2Book", "coin": sym}}))
+                        await asyncio.sleep(0.1)
                     async for raw in ws:
                         await self._handle_message(raw)
             except Exception:
