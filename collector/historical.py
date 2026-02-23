@@ -126,6 +126,20 @@ class HistoricalDownloader:
         day_start: datetime,
         day_end: datetime,
     ) -> bool:
+        """Return True only when the day has >=95% of expected candles.
+
+        Checking for *any* row is insufficient: an interrupted run leaves a
+        partial day that is then permanently skipped on rerun.  Instead we
+        compare the actual row count against the number of intervals that fit
+        in the window and treat the day as complete only when coverage is high.
+        """
+        interval_ms = interval_to_ms(interval)
+        # Use the actual fetch window (already clipped by caller to the real
+        # start/end boundary), not a full calendar day, so the first and last
+        # partial days are measured against the right expected count.
+        window_ms = int((day_end - day_start).total_seconds() * 1000)
+        expected = max(1, window_ms // interval_ms)
+
         pool = await db.connect()
         async with pool.acquire() as conn:
             cnt = await conn.fetchval(
@@ -144,14 +158,23 @@ class HistoricalDownloader:
                 day_start,
                 day_end,
             )
-        return bool(cnt and cnt > 0)
+        return bool(cnt and cnt >= expected * 0.95)
 
     async def _has_funding(self, symbol: str, start: datetime) -> bool:
+        """Return True when funding history is current (latest row within 24 h of now).
+
+        Count-based checks fail for newly-listed symbols whose history is
+        shorter than the full backfill window.  Using the latest timestamp is
+        exchange-agnostic: if we have a recent row the symbol is up to date
+        regardless of listing age, and any partial previous run is caught
+        because the latest row will lag behind the present time.
+        """
+        now = datetime.now(timezone.utc)
         pool = await db.connect()
         async with pool.acquire() as conn:
-            cnt = await conn.fetchval(
+            latest = await conn.fetchval(
                 """
-                SELECT COUNT(*)
+                SELECT MAX(time)
                 FROM oi_snapshots
                 WHERE exchange = 'hyperliquid_funding'
                   AND symbol = $1
@@ -160,7 +183,10 @@ class HistoricalDownloader:
                 symbol,
                 start,
             )
-        return bool(cnt and cnt > 0)
+        if latest is None:
+            return False
+        # HL funding is emitted every 8 h; within-24h means we're current.
+        return (now - latest).total_seconds() < 86_400
 
     async def _insert_candles_bulk(self, rows: list[tuple[Any, ...]]) -> None:
         if not rows:
@@ -254,7 +280,10 @@ class HistoricalDownloader:
         day = start.replace(hour=0, minute=0, second=0, microsecond=0)
         while day < end:
             day_end = min(day + timedelta(days=1), end)
-            if await self._day_has_candles("hyperliquid", symbol, interval, day, day_end):
+            # Use the actual fetch boundary (not bare midnight) so the
+            # completeness check counts against the same window we fetched.
+            actual_day_start = max(day, start)
+            if await self._day_has_candles("hyperliquid", symbol, interval, actual_day_start, day_end):
                 self.summary.hl_candle_days_skipped += 1
                 day = day + timedelta(days=1)
                 continue
@@ -376,7 +405,8 @@ class HistoricalDownloader:
         day = start.replace(hour=0, minute=0, second=0, microsecond=0)
         while day < end:
             day_end = min(day + timedelta(days=1), end)
-            if await self._day_has_candles("binance", symbol, "1m", day, day_end):
+            actual_day_start = max(day, start)
+            if await self._day_has_candles("binance", symbol, "1m", actual_day_start, day_end):
                 self.summary.binance_days_skipped += 1
                 day = day + timedelta(days=1)
                 continue

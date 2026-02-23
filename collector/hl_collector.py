@@ -28,6 +28,16 @@ def ffloat(v: Any, default: float = 0.0) -> float:
         return default
 
 
+HL_SYMBOLS = [
+    "BTC", "ETH", "SOL", "BNB", "XRP", "DOGE", "ADA", "AVAX", "LINK", "DOT",
+    "UNI", "ATOM", "LTC", "ARB", "OP", "WLD", "INJ", "SUI", "PEPE", "WIF",
+    "BONK", "JUP", "TIA", "SEI", "APT", "NEAR", "FIL", "ETC", "BCH",
+]
+
+# Depth (levels) used to compute orderbook imbalance
+OB_DEPTH = 10
+
+
 class HyperliquidCollector:
     def __init__(self) -> None:
         load_dotenv(Path(__file__).resolve().parent.parent / ".env")
@@ -77,8 +87,9 @@ class HyperliquidCollector:
     async def _stats_loop(self) -> None:
         while True:
             await asyncio.sleep(60)
-            logger.info("stats trades=%d liq=%d oi=%d",
-                        self.stats["trades"], self.stats["liquidations"], self.stats["oi_snapshots"])
+            logger.info("stats trades=%d liq=%d oi=%d ob=%d",
+                        self.stats["trades"], self.stats["liquidations"],
+                        self.stats["oi_snapshots"], self.stats["orderbook"])
 
     async def _handle_message(self, raw: str) -> None:
         msg = json.loads(raw)
@@ -106,6 +117,24 @@ class HyperliquidCollector:
                     await db.insert_liquidation(ts, "hyperliquid", symbol, side, price, size)
                     self.stats["liquidations"] += 1
 
+        elif channel == "l2Book" and isinstance(data, dict):
+            symbol = data.get("coin")
+            levels = data.get("levels")
+            if not symbol or not isinstance(levels, list) or len(levels) < 2:
+                return
+            bids, asks = levels[0], levels[1]
+
+            bid_vol = sum(ffloat(l.get("sz")) for l in bids[:OB_DEPTH])
+            ask_vol = sum(ffloat(l.get("sz")) for l in asks[:OB_DEPTH])
+            best_bid = ffloat(bids[0].get("px")) if bids else 0.0
+            best_ask = ffloat(asks[0].get("px")) if asks else 0.0
+            spread = best_ask - best_bid if best_bid > 0 and best_ask > 0 else 0.0
+            total = bid_vol + ask_vol
+            imbalance = (bid_vol - ask_vol) / total if total > 0 else 0.0
+
+            await db.insert_orderbook(ts, "hyperliquid", symbol, bid_vol, ask_vol, spread, imbalance)
+            self.stats["orderbook"] += 1
+
     async def _ws_loop(self) -> None:
         backoff = 1
         while True:
@@ -115,6 +144,8 @@ class HyperliquidCollector:
                     backoff = 1
                     await ws.send(json.dumps({"method": "subscribe", "subscription": {"type": "trades"}}))
                     await ws.send(json.dumps({"method": "subscribe", "subscription": {"type": "liquidations"}}))
+                    for sym in HL_SYMBOLS:
+                        await ws.send(json.dumps({"method": "subscribe", "subscription": {"type": "l2Book", "coin": sym}}))
                     async for raw in ws:
                         await self._handle_message(raw)
             except Exception:
