@@ -75,8 +75,7 @@ class BinanceCollector:
                     for symbol in SYMBOLS:
                         cached = self._mark_cache.get(symbol)
                         if not cached:
-                            await asyncio.sleep(1)
-                            continue
+                            continue  # mark price not yet received; skip until next cycle
 
                         mark_price, funding_rate = cached
                         try:
