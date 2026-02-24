@@ -2,6 +2,7 @@ import asyncio
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+import random
 from typing import Any
 
 import aiohttp
@@ -197,6 +198,7 @@ class HistoricalDownloader:
                 """
                 INSERT INTO candles (time, exchange, symbol, interval, open, high, low, close, volume)
                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+                ON CONFLICT (time, exchange, symbol, interval) DO NOTHING
                 """,
                 rows,
             )
@@ -222,27 +224,28 @@ class HistoricalDownloader:
                     await self.hl_rate.wait(symbol)
                     async with session.post(HL_URL, json=payload, timeout=self.timeout) as resp:
                         if resp.status == 429:
-                            await asyncio.sleep(2 * (i + 1))
+                            await asyncio.sleep((2 ** (i + 1)) + random.uniform(0, 1))
                             continue
                         resp.raise_for_status()
                         return await resp.json()
             except Exception as exc:  # noqa: PERF203
                 if i == retries - 1:
                     raise exc
-                await asyncio.sleep(1.0 * (i + 1))
+                await asyncio.sleep((2 ** (i + 1)) + random.uniform(0, 1))
         return []
 
     async def _get_binance_klines(
         self,
         session: aiohttp.ClientSession,
         symbol: str,
+        interval: str,
         start_ms: int,
         end_ms: int,
         limit: int = 1500,
     ) -> list[Any]:
         params = {
             "symbol": symbol,
-            "interval": "1m",
+            "interval": interval,
             "startTime": start_ms,
             "endTime": end_ms,
             "limit": limit,
@@ -254,7 +257,7 @@ class HistoricalDownloader:
                     await self.binance_rate.wait()
                     async with session.get(BINANCE_KLINES_URL, params=params, timeout=self.timeout) as resp:
                         if resp.status == 429:
-                            await asyncio.sleep(2 * (i + 1))
+                            await asyncio.sleep((2 ** (i + 1)) + random.uniform(0, 1))
                             continue
                         resp.raise_for_status()
                         data = await resp.json()
@@ -264,7 +267,7 @@ class HistoricalDownloader:
             except Exception as exc:  # noqa: PERF203
                 if i == retries - 1:
                     raise exc
-                await asyncio.sleep(1.0 * (i + 1))
+                await asyncio.sleep((2 ** (i + 1)) + random.uniform(0, 1))
         return []
 
     async def _download_hl_candles_for_symbol(
@@ -402,52 +405,65 @@ class HistoricalDownloader:
         start: datetime,
         end: datetime,
     ) -> None:
-        day = start.replace(hour=0, minute=0, second=0, microsecond=0)
-        while day < end:
-            day_end = min(day + timedelta(days=1), end)
-            actual_day_start = max(day, start)
-            if await self._day_has_candles("binance", symbol, "1m", actual_day_start, day_end):
-                self.summary.binance_days_skipped += 1
-                day = day + timedelta(days=1)
-                continue
-
-            start_ms = max(dt_to_ms(day), dt_to_ms(start))
-            end_ms = dt_to_ms(day_end)
-            print(
-                f"[Binance klines] {symbol} 1m "
-                f"{datetime.fromtimestamp(start_ms / 1000, tz=timezone.utc).isoformat()} -> "
-                f"{datetime.fromtimestamp(end_ms / 1000, tz=timezone.utc).isoformat()}"
-            )
-            try:
-                rows = await self._get_binance_klines(session, symbol, start_ms, end_ms, limit=1500)
-            except Exception as exc:
-                self.summary.add_error(f"Binance klines request failed for {symbol}: {exc}")
-                day = day + timedelta(days=1)
-                continue
-
-            to_insert: list[tuple[Any, ...]] = []
-            for row in rows:
-                try:
-                    ts = datetime.fromtimestamp(int(row[0]) / 1000, tz=timezone.utc)
-                    to_insert.append(
-                        (
-                            ts,
-                            "binance",
-                            symbol,
-                            "1m",
-                            float(row[1]),
-                            float(row[2]),
-                            float(row[3]),
-                            float(row[4]),
-                            float(row[5]),
-                        )
-                    )
-                except Exception:
+        for interval in ("1m", "5m"):
+            day = start.replace(hour=0, minute=0, second=0, microsecond=0)
+            while day < end:
+                day_end = min(day + timedelta(days=1), end)
+                actual_day_start = max(day, start)
+                if await self._day_has_candles("binance", symbol, interval, actual_day_start, day_end):
+                    self.summary.binance_days_skipped += 1
+                    day = day + timedelta(days=1)
                     continue
 
-            await self._insert_candles_bulk(to_insert)
-            self.summary.binance_candle_rows += len(to_insert)
-            day = day + timedelta(days=1)
+                start_ms = max(dt_to_ms(day), dt_to_ms(start))
+                end_ms = dt_to_ms(day_end) - 1  # Binance endTime is inclusive; make range effectively exclusive.
+                if end_ms < start_ms:
+                    day = day + timedelta(days=1)
+                    continue
+                print(
+                    f"[Binance klines] {symbol} {interval} "
+                    f"{datetime.fromtimestamp(start_ms / 1000, tz=timezone.utc).isoformat()} -> "
+                    f"{datetime.fromtimestamp(end_ms / 1000, tz=timezone.utc).isoformat()}"
+                )
+                try:
+                    rows = await self._get_binance_klines(
+                        session,
+                        symbol,
+                        interval,
+                        start_ms,
+                        end_ms,
+                        limit=1500,
+                    )
+                except Exception as exc:
+                    self.summary.add_error(
+                        f"Binance klines request failed for {symbol} {interval}: {exc}"
+                    )
+                    day = day + timedelta(days=1)
+                    continue
+
+                to_insert: list[tuple[Any, ...]] = []
+                for row in rows:
+                    try:
+                        ts = datetime.fromtimestamp(int(row[0]) / 1000, tz=timezone.utc)
+                        to_insert.append(
+                            (
+                                ts,
+                                "binance",
+                                symbol,
+                                interval,
+                                float(row[1]),
+                                float(row[2]),
+                                float(row[3]),
+                                float(row[4]),
+                                float(row[5]),
+                            )
+                        )
+                    except Exception:
+                        continue
+
+                await self._insert_candles_bulk(to_insert)
+                self.summary.binance_candle_rows += len(to_insert)
+                day = day + timedelta(days=1)
 
     async def download_binance_klines(self, start: datetime, end: datetime) -> None:
         async with aiohttp.ClientSession() as session:
