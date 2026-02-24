@@ -5,6 +5,7 @@ from collections import defaultdict
 from datetime import datetime, timezone
 from typing import Any
 
+import aiohttp
 import websockets
 
 from collector.db import db
@@ -35,6 +36,7 @@ def ffloat(v: Any, default: float = 0.0) -> float:
 class BinanceCollector:
     def __init__(self) -> None:
         self.stats: dict = defaultdict(int)
+        self._mark_cache: dict[str, tuple[float, float]] = {}
 
     def ws_url(self) -> str:
         streams = []
@@ -62,8 +64,42 @@ class BinanceCollector:
         mark_price = ffloat(payload.get("p"))
         funding_rate = ffloat(payload.get("r"))
         if symbol and mark_price > 0:
-            await db.insert_oi_snapshot(now_utc(), "binance", symbol, 0.0, mark_price, funding_rate)
-            self.stats["oi"] += 1
+            self._mark_cache[symbol] = (mark_price, funding_rate)
+
+    async def _poll_oi_loop(self) -> None:
+        base_url = "https://fapi.binance.com/fapi/v1/openInterest"
+        while True:
+            cycle_start = asyncio.get_running_loop().time()
+            try:
+                async with aiohttp.ClientSession() as session:
+                    for symbol in SYMBOLS:
+                        cached = self._mark_cache.get(symbol)
+                        if not cached:
+                            await asyncio.sleep(1)
+                            continue
+
+                        mark_price, funding_rate = cached
+                        try:
+                            async with session.get(
+                                base_url,
+                                params={"symbol": symbol},
+                                timeout=aiohttp.ClientTimeout(total=10),
+                            ) as resp:
+                                resp.raise_for_status()
+                                payload = await resp.json()
+
+                            oi = ffloat(payload.get("openInterest"))
+                            await db.insert_oi_snapshot(now_utc(), "binance", symbol, oi, mark_price, funding_rate)
+                            self.stats["oi"] += 1
+                        except Exception:
+                            logger.exception("Binance OI REST poll failed for %s", symbol)
+
+                        await asyncio.sleep(1)
+            except Exception:
+                logger.exception("Binance OI poll loop error")
+
+            elapsed = asyncio.get_running_loop().time() - cycle_start
+            await asyncio.sleep(max(0, 60 - elapsed))
 
     async def _handle_liquidation(self, payload: dict) -> None:
         # forceOrder payload: {"e":"forceOrder","E":...,"o":{...}}
@@ -122,6 +158,7 @@ class BinanceCollector:
         await asyncio.gather(
             self._main_ws_loop(),
             self._liquidation_ws_loop(),
+            self._poll_oi_loop(),
             self._stats_loop(),
         )
 
