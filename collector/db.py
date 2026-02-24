@@ -99,6 +99,25 @@ async def create_tables() -> None:
         await conn.execute(
             "SELECT create_hypertable('candles', 'time', if_not_exists => TRUE);"
         )
+        await conn.execute("""
+            DELETE FROM candles c
+            USING (
+                SELECT ctid
+                FROM (
+                    SELECT ctid, ROW_NUMBER() OVER (
+                        PARTITION BY time, exchange, symbol, interval
+                        ORDER BY ctid
+                    ) AS rn
+                    FROM candles
+                ) ranked
+                WHERE rn > 1
+            ) dups
+            WHERE c.ctid = dups.ctid;
+        """)
+        await conn.execute("""
+            CREATE UNIQUE INDEX IF NOT EXISTS candles_time_exchange_symbol_interval_idx
+            ON candles (time, exchange, symbol, interval);
+        """)
 
 
 async def insert_trade(time: datetime, exchange: str, symbol: str, price: float, size: float, side: str) -> None:
@@ -151,7 +170,9 @@ async def insert_candle(
     pool = await connect()
     async with pool.acquire() as conn:
         await conn.execute(
-            "INSERT INTO candles (time, exchange, symbol, interval, open, high, low, close, volume) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)",
+            "INSERT INTO candles (time, exchange, symbol, interval, open, high, low, close, volume) "
+            "VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) "
+            "ON CONFLICT (time, exchange, symbol, interval) DO NOTHING",
             time, exchange, symbol, interval, open_, high, low, close, volume,
         )
 
