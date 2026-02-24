@@ -136,16 +136,19 @@ class HyperliquidCollector:
             self.stats["orderbook"] += 1
 
     async def _ws_loop(self) -> None:
+        # HL WS API requires per-coin subscriptions for trades and l2Book.
+        # Global {"type":"trades"} and {"type":"liquidations"} are not valid.
+        # Cap to top 10 symbols and stagger 100ms each to avoid server-side drops.
+        # HL has no public liquidation WS feed — liquidations come from REST if needed.
         backoff = 1
         while True:
             try:
                 async with websockets.connect(self.ws_url, ping_interval=20, ping_timeout=20, max_queue=1000) as ws:
                     logger.info("Connected to Hyperliquid WS")
                     backoff = 1
-                    await ws.send(json.dumps({"method": "subscribe", "subscription": {"type": "trades"}}))
-                    await ws.send(json.dumps({"method": "subscribe", "subscription": {"type": "liquidations"}}))
-                    # l2Book: cap to top 10 symbols and stagger to avoid server-side drop
                     for sym in HL_SYMBOLS[:10]:
+                        await ws.send(json.dumps({"method": "subscribe", "subscription": {"type": "trades", "coin": sym}}))
+                        await asyncio.sleep(0.1)
                         await ws.send(json.dumps({"method": "subscribe", "subscription": {"type": "l2Book", "coin": sym}}))
                         await asyncio.sleep(0.1)
                     async for raw in ws:
