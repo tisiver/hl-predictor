@@ -99,25 +99,35 @@ async def create_tables() -> None:
         await conn.execute(
             "SELECT create_hypertable('candles', 'time', if_not_exists => TRUE);"
         )
-        await conn.execute("""
-            DELETE FROM candles c
-            USING (
-                SELECT ctid
-                FROM (
-                    SELECT ctid, ROW_NUMBER() OVER (
-                        PARTITION BY time, exchange, symbol, interval
-                        ORDER BY ctid
-                    ) AS rn
-                    FROM candles
-                ) ranked
-                WHERE rn > 1
-            ) dups
-            WHERE c.ctid = dups.ctid;
+        index_exists = await conn.fetchval("""
+            SELECT EXISTS (
+                SELECT 1
+                FROM pg_indexes
+                WHERE schemaname = current_schema()
+                  AND tablename = 'candles'
+                  AND indexname = 'candles_time_exchange_symbol_interval_idx'
+            );
         """)
-        await conn.execute("""
-            CREATE UNIQUE INDEX IF NOT EXISTS candles_time_exchange_symbol_interval_idx
-            ON candles (time, exchange, symbol, interval);
-        """)
+        if not index_exists:
+            await conn.execute("""
+                DELETE FROM candles c
+                USING (
+                    SELECT ctid
+                    FROM (
+                        SELECT ctid, ROW_NUMBER() OVER (
+                            PARTITION BY time, exchange, symbol, interval
+                            ORDER BY ctid
+                        ) AS rn
+                        FROM candles
+                    ) ranked
+                    WHERE rn > 1
+                ) dups
+                WHERE c.ctid = dups.ctid;
+            """)
+            await conn.execute("""
+                CREATE UNIQUE INDEX IF NOT EXISTS candles_time_exchange_symbol_interval_idx
+                ON candles (time, exchange, symbol, interval);
+            """)
 
 
 async def insert_trade(time: datetime, exchange: str, symbol: str, price: float, size: float, side: str) -> None:

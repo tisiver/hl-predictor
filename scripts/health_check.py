@@ -28,7 +28,7 @@ STALE_THRESHOLDS = {
     "oi_snapshots": 10,
     "orderbook_imbalance": 10,
     "liquidations": 60,   # liquidations are sparse, allow up to 1h gap
-    "candles": 90,        # candles are 1-min bars, allow up to 90min
+    "candles": 5,         # candles are collected live
 }
 
 

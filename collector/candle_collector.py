@@ -80,6 +80,8 @@ class CandleCollector:
                         stream = msg.get("stream", "")
                         if "@kline_" in stream:
                             await self._handle_binance_kline(data)
+            except asyncio.CancelledError:
+                raise
             except Exception:
                 logger.exception("Binance kline WS error, reconnect in %ss", backoff)
                 await asyncio.sleep(backoff)
@@ -106,7 +108,16 @@ class CandleCollector:
         if not isinstance(data, list) or not data:
             return
 
-        completed = [c for c in data if isinstance(c, dict) and c.get("t") is not None and int(c["t"]) <= now_ms - interval_ms]
+        completed = []
+        for c in data:
+            if not isinstance(c, dict) or c.get("t") is None:
+                continue
+            try:
+                open_time_ms = int(c["t"])
+            except (TypeError, ValueError):
+                continue
+            if open_time_ms + interval_ms <= now_ms:
+                completed.append(c)
         if not completed:
             return
         candle = completed[-1]
@@ -135,10 +146,21 @@ class CandleCollector:
                         if sleep_for > 0:
                             await asyncio.sleep(sleep_for)
                         try:
-                            await self._fetch_hl_candle(session, coin, "1m")
-                            await self._fetch_hl_candle(session, coin, "5m")
+                            await asyncio.wait_for(
+                                asyncio.gather(
+                                    self._fetch_hl_candle(session, coin, "1m"),
+                                    self._fetch_hl_candle(session, coin, "5m"),
+                                ),
+                                timeout=1.9,
+                            )
+                        except asyncio.CancelledError:
+                            raise
+                        except asyncio.TimeoutError:
+                            logger.warning("HL candle poll timed out for coin=%s", coin)
                         except Exception:
                             logger.exception("HL candle poll failed for coin=%s", coin)
+            except asyncio.CancelledError:
+                raise
             except Exception:
                 logger.exception("HL candle polling loop failed")
             sleep_for = (cycle_start + 60) - asyncio.get_running_loop().time()
