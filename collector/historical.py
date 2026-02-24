@@ -211,7 +211,14 @@ class HistoricalDownloader:
             await conn.executemany(
                 """
                 INSERT INTO oi_snapshots (time, exchange, symbol, oi, mark_price, funding_rate)
-                VALUES ($1,$2,$3,$4,$5,$6)
+                SELECT $1,$2,$3,$4,$5,$6
+                WHERE NOT EXISTS (
+                    SELECT 1
+                    FROM oi_snapshots
+                    WHERE time = $1
+                      AND exchange = $2
+                      AND symbol = $3
+                )
                 """,
                 rows,
             )
