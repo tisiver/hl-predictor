@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+from collections import defaultdict
 from datetime import datetime, timezone
 from typing import Any
 
@@ -10,6 +11,8 @@ from collector.db import db
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
 logger = logging.getLogger("binance_collector")
+
+LIQUIDATION_WS_URL = "wss://fstream.binance.com/ws/!forceOrder@arr"
 
 TOP_SYMBOLS = [
     "BTC", "ETH", "SOL", "BNB", "XRP", "DOGE", "ADA", "AVAX", "LINK", "DOT",
@@ -30,6 +33,9 @@ def ffloat(v: Any, default: float = 0.0) -> float:
 
 
 class BinanceCollector:
+    def __init__(self) -> None:
+        self.stats: dict = defaultdict(int)
+
     def ws_url(self) -> str:
         streams = []
         for sym in SYMBOLS:
@@ -49,6 +55,7 @@ class BinanceCollector:
         side = "sell" if payload.get("m") else "buy"  # m=True => buyer is market maker
         if symbol and price > 0 and size > 0:
             await db.insert_trade(now_utc(), "binance", symbol, price, size, side)
+            self.stats["trades"] += 1
 
     async def _handle_mark_price(self, payload: dict) -> None:
         symbol = payload.get("s")
@@ -56,9 +63,26 @@ class BinanceCollector:
         funding_rate = ffloat(payload.get("r"))
         if symbol and mark_price > 0:
             await db.insert_oi_snapshot(now_utc(), "binance", symbol, 0.0, mark_price, funding_rate)
+            self.stats["oi"] += 1
 
-    async def run(self) -> None:
-        await self.setup()
+    async def _handle_liquidation(self, payload: dict) -> None:
+        # forceOrder payload: {"e":"forceOrder","E":...,"o":{...}}
+        order = payload.get("o") if payload.get("e") == "forceOrder" else payload
+        symbol = order.get("s")
+        side = "buy" if str(order.get("S", "")).upper() == "BUY" else "sell"
+        price = ffloat(order.get("ap") or order.get("p"))  # avg fill price, fallback to order price
+        size = ffloat(order.get("z") or order.get("q"))    # filled qty, fallback to order qty
+        if symbol and price > 0 and size > 0:
+            await db.insert_liquidation(now_utc(), "binance", symbol, side, price, size)
+            self.stats["liquidations"] += 1
+
+    async def _stats_loop(self) -> None:
+        while True:
+            await asyncio.sleep(60)
+            logger.info("binance stats trades=%d oi=%d liq=%d",
+                        self.stats["trades"], self.stats["oi"], self.stats["liquidations"])
+
+    async def _main_ws_loop(self) -> None:
         backoff = 1
         while True:
             try:
@@ -77,6 +101,29 @@ class BinanceCollector:
                 logger.exception("Binance WS error, reconnect in %ss", backoff)
                 await asyncio.sleep(backoff)
                 backoff = min(backoff * 2, 60)
+
+    async def _liquidation_ws_loop(self) -> None:
+        backoff = 1
+        while True:
+            try:
+                async with websockets.connect(LIQUIDATION_WS_URL, ping_interval=20, ping_timeout=20) as ws:
+                    logger.info("Connected to Binance liquidation WS (!forceOrder@arr)")
+                    backoff = 1
+                    async for raw in ws:
+                        payload = json.loads(raw)
+                        await self._handle_liquidation(payload)
+            except Exception:
+                logger.exception("Binance liquidation WS error, reconnect in %ss", backoff)
+                await asyncio.sleep(backoff)
+                backoff = min(backoff * 2, 60)
+
+    async def run(self) -> None:
+        await self.setup()
+        await asyncio.gather(
+            self._main_ws_loop(),
+            self._liquidation_ws_loop(),
+            self._stats_loop(),
+        )
 
 
 if __name__ == "__main__":
