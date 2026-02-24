@@ -109,25 +109,28 @@ async def create_tables() -> None:
             );
         """)
         if not index_exists:
-            await conn.execute("""
-                DELETE FROM candles c
-                USING (
-                    SELECT ctid
-                    FROM (
-                        SELECT ctid, ROW_NUMBER() OVER (
-                            PARTITION BY time, exchange, symbol, interval
-                            ORDER BY ctid
-                        ) AS rn
-                        FROM candles
-                    ) ranked
-                    WHERE rn > 1
-                ) dups
-                WHERE c.ctid = dups.ctid;
-            """)
-            await conn.execute("""
-                CREATE UNIQUE INDEX IF NOT EXISTS candles_time_exchange_symbol_interval_idx
-                ON candles (time, exchange, symbol, interval);
-            """)
+            try:
+                await conn.execute("""
+                    DELETE FROM candles c
+                    USING (
+                        SELECT ctid
+                        FROM (
+                            SELECT ctid, ROW_NUMBER() OVER (
+                                PARTITION BY time, exchange, symbol, interval
+                                ORDER BY ctid
+                            ) AS rn
+                            FROM candles
+                        ) ranked
+                        WHERE rn > 1
+                    ) dups
+                    WHERE c.ctid = dups.ctid;
+                """)
+                await conn.execute("""
+                    CREATE UNIQUE INDEX candles_time_exchange_symbol_interval_idx
+                    ON candles (time, exchange, symbol, interval);
+                """)
+            except Exception:
+                pass  # another collector won the race — index already exists
 
 
 async def insert_trade(time: datetime, exchange: str, symbol: str, price: float, size: float, side: str) -> None:
